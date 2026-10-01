@@ -1,0 +1,27 @@
+复核完成。已通读后端全部 46 个 Java 文件、`database/init.sql`、`application.yml`、以及视觉服务的 `app.py`/`detector.py`，两处修复点及其上下游契约均已核验。
+
+## 一、两处修复点复核结论
+
+**1. `trackSuspicious` 假阴性 → 已修复且口径一致**
+- `VisionService.hasNoActiveReservation`（206-221 行）现与 `computeStatus`（141-157 行）完全同口径：仅当 `now` 落在 slot 时段窗口 `[startTime, endTime)` 内、且状态为待签到/已签到的预约才视为「有效预约」。
+- 调用链 `trackSuspicious`（188 行）`!hasNoActiveReservation(...)` 语义正确：有有效预约即重置占座计时，无有效预约才累计。逻辑闭环，无残留假阴性。
+
+**2. `seat_status_log.confidence` 硬编码 → 已修复且端到端打通**
+- `fetchDetect`（257-261 行）解析视觉服务返回的真实 `confidence`，`DetectResult` 携带 `occupied + confidence`，`updateSeatStatus`（170 行）写 `BigDecimal.valueOf(confidence)`。
+- 已核验上游契约：`vision-service/app.py:114` 确实返回 `confidence`，`detector.py:155-156` 计算并 `round(confidence, 2)`（float 类型，`conf instanceof Number` 可正确命中）；`seat_status_log` 表 `confidence DECIMAL(5,2)` 与写入值兼容。兜底默认 0.9 保留合理。
+
+## 二、分级问题清单
+
+**致命问题：无**
+**重要问题：无**
+
+**低优先级（不阻塞交付，可选）：**
+1. `syncSeatStatus` 存在 N+1 查询：每个被覆盖座位在 `computeStatus` 与 `trackSuspicious→hasNoActiveReservation` 各发起一次预约查询 + 逐预约查 slot。30 座 / 5 秒轮询约数百次查询/5s，当前规模可接受，量大时可改为按 room 批量加载活跃预约。
+2. 「在座但未签到」政策缺口（既有设计选择，非缺陷）：学生物理占座但不签到，`handleTimeoutViolations` 因 `emptyMinutes==0` 永久跳过、`trackSuspicious` 因有 PENDING 预约不告警，座位将长期停留 RESERVED。属注释中已声明的「暂不处理」策略，如需收紧需产品定夺。
+3. `AdminService.deleteRoom` 未校验孤儿时段：无座位但仍有 slot 的房间删除后遗留孤儿 slot 行。
+
+## 三、最终结论
+
+- **可交付**：是。核心链路（预约事务/唯一索引兜底、签到/取消条件更新防竞态、违约/离座扫描、视觉联动、权限拦截、统计报表）无致命或重要缺陷，两处历史低优建议已正确落地。
+- **是否达到「第一次就写完善」标准**：是。并发、状态机、视觉降级、敏感信息脱敏（`@JsonIgnore` 密码、不打印明文密码）、审计日志等关键点均已妥善处理。
+- **是否建议停止迭代**：**建议停止**。剩余仅为低优先级可选优化，继续迭代收益递减；可进入部署/验收阶段（部署前记得覆盖 `JWT_SECRET`、`MYSQL_PASSWORD`、`STUDYROOM_ADMIN_PASSWORD` 三处默认值）。

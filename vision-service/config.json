@@ -1,0 +1,28 @@
+{
+  "video_source": 0,
+  "room_id": 1,
+  "frame_interval": 1.0,
+  "detector": "mog2",
+  "mog2": {
+    "history": 200,
+    "var_threshold": 16,
+    "detect_shadows": false,
+    "learning_rate": 0.0,
+    "min_area": 800,
+    "min_w": 30,
+    "min_h": 30,
+    "min_ratio": 0.25,
+    "max_ratio": 4.0,
+    "overlap_threshold": 0.5,
+    "debounce_frames": 3,
+    "reset_frames": 30
+  },
+  "seats": [
+    { "seat_no": "A-01", "bbox": [60, 60, 130, 130] },
+    { "seat_no": "A-02", "bbox": [160, 60, 230, 130] },
+    { "seat_no": "A-03", "bbox": [260, 60, 330, 130] },
+    { "seat_no": "A-04", "bbox": [360, 60, 430, 130] },
+    { "seat_no": "A-05", "bbox": [460, 60, 530, 130] },
+    { "seat_no": "A-06", "bbox": [560, 60, 630, 130] }
+  ]
+}

@@ -1,0 +1,30 @@
+复核完成。以下为第三轮最终结论。
+
+## 四项修复逐一验证
+
+| # | 上轮建议 | 验证结果 |
+|---|---|---|
+| 1 | 非原子发布 | ✅ `VisionService.java:66-76` 引入 `VisionSnapshot`，`volatile snapshot` 单次原子赋值（`Set.copyOf(detect.keySet())`）；`isVisionAvailable()`/`isSeatCovered()`/`hasSeatCoverage()` 均读同一快照字段，无撕裂窗口 |
+| 2 | 空 if 分支 | ✅ `ReservationScanTask.java:95-105` 改为正向条件，无空分支 |
+| 3 | 重启首轮 results:[] | ✅ 由 `hasSeatCoverage()`（`available && !coveredSeatIds.isEmpty()`）保护，避免误判违约 |
+| 4 | README 类数 | ✅ 已改 46，Glob 实测后端 `.java` 文件恰为 46 个 |
+
+## 全工程快速复查（安全/业务/并发关键路径）
+
+- **鉴权**：`AdminController` 类级 `@RequireRole(1)` + `JwtInterceptor` 方法级优先/类级兜底（`AnnotatedElementUtils`），视觉重置/健康单独标管理员；拦截器放行 OPTIONS 预检；`/api/auth/login|register` 排除。✅
+- **密码安全**：`User.password` 加 `@JsonIgnore`（登录返回用户对象也不泄露）；BCrypt；`JWT_SECRET`/`MYSQL_PASSWORD`/`STUDYROOM_ADMIN_PASSWORD` 三处环境变量注入已就位（`application.yml`）。✅
+- **并发**：预约创建唯一索引兜底 + `DuplicateKeyException` 全局 409；取消/签到/违约/提前结束全部走「条件更新」防竞态。✅
+- **异常**：`GlobalExceptionHandler` 把 `BusinessException` 映射为真实 HTTP 状态码。✅
+- **视觉违约口径**：不可用→释放不计违约；覆盖房间空座→违约；覆盖房间占用→等待；非覆盖房间→按规则违约。逻辑闭环、无空分支。✅
+
+## 分级问题清单
+
+**致命 / 重要：无。**
+
+**低优先（建议，不影响交付）**
+1. `VisionService.java:84-85` 注入的 `suspiciousAfterMinutes` 字段**从未被使用**——「疑似占座」目前是在状态翻转瞬间即告警，未按该阈值判断"持续占用满 N 分钟"。属死字段/未落地的小功能，仅建议后续补一个基于 `seatEmptySince` 或占用时长的判定，或删除该字段。
+2. `VisionService.java:285` `visionOccupied` 用 `status == IN_USE` 近似，会把"已签到(预约中)"的座位也标为视觉占用，语义略有偏差（仅前端展示，不影响判定逻辑）。
+
+## 结论
+
+**可交付。** 四项修复全部正确落地且语义严谨；全工程无致命、无重要遗留问题，鉴权、密码安全、并发竞态、视觉违约口径等关键路径均达到课程设计/毕设答辩语境下的完善标准——**已达到"第一次就写完善"的目标**。仅存 2 条低优先建议，可按需择机处理，不构成交付阻塞。

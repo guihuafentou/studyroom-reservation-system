@@ -1,0 +1,95 @@
+审查完成。我已通读后端全部 Java 文件、前端核心视图与 API 层、视觉服务及数据库脚本、设计方案。以下按三级列出问题（含 `文件:行号`）。
+
+---
+
+## 【致命】
+
+**1. 越权漏洞：类级 `@RequireRole` 注解被拦截器忽略，管理员接口对任意登录学生开放**
+- `backend/.../security/JwtInterceptor.java:42`
+- `backend/.../controller/AdminController.java:29`
+- 问题：`JwtInterceptor` 仅用 `handlerMethod.getMethodAnnotation(RequireRole.class)` 取**方法级**注解；而 `AdminController` 的 `@RequireRole(1)` 标在**类上**，方法级为空 → `requireRole == null` → 角色校验被跳过。所有 `/api/admin/**`（用户管理、强制取消、审计、统计、视觉重置）均对任意已登录学生开放，是典型的水平/垂直越权。前端路由守卫（`router/index.js:36`）只是 UI 层，可被直接调 API 绕过。
+- 修复：改用 `AnnotatedElementUtils.findMergedAnnotation(handlerMethod.getMethod(), RequireRole.class)`，或 fallback 到 `handlerMethod.getBeanType().getAnnotation(RequireRole.class)`。
+
+**2. 视觉服务 `/detect` 响应结构与后端解析不匹配，视觉联动链路整体失效**
+- `backend/.../service/VisionService.java:159-161`（`fetchDetect` 声明 `ParameterizedTypeReference<List<Map<String,Object>>>`）
+- `vision-service/app.py:101-104`（返回 `{"room_id":..,"detector":..,"results":[{...}]}`，`results` 嵌套在对象里，且错误时返回 `{"error":..}`）
+- 问题：后端期望顶层是 JSON **数组**，视觉服务返回的是**对象**。Jackson 反序列化对象→List 恒抛异常 → `syncSeatStatus` 捕获后置 `visionAvailable=false` 并 return（`VisionService.java:72-76`）。结果：座位状态从不更新、`seatEmptySince` 从不建立 → 违约判定、离座释放、疑似占座全部瘫痪。
+- 修复：后端改收顶层 `Map` 再取 `results`（或定义 DTO），并兼容 `{"error":..}`；或视觉服务直接返回数组。
+
+---
+
+## 【重要】
+
+**3. 状态机不完整：`已签到(1)→已完成(2)` 从未流转**
+- `backend/.../task/ReservationScanTask.java`（只有 PENDING→违约/取消、SIGNED→提前结束）、`ReservationService.java`（create→PENDING、cancel→CANCELED、sign→SIGNED）、`AdminService.forceCancel`
+- 问题：全工程无任何代码写入 `STATUS_FINISHED`。学生正常签到并坐到时段结束，记录永远停在"已签到"；统计"今日已完成"（`StatsService.java:41`）恒为 0。需增加"时段结束→已完成"的扫描（或视觉/定时兜底），并处理跨天已签到记录的收尾。
+
+**4. 非视觉覆盖房间的预约永远无法结算（卡死）**
+- `backend/.../service/VisionService.java:79-81`（只查 `visionRoomId`）、`ReservationScanTask.java:60-97`
+- 问题：`seatEmptySince` 只维护 `studyroom.vision.room-id=1` 的座位。自习室 2 的预约：`emptyMinutes()` 恒为 0 → `handleTimeoutViolations` 落入"视觉可用但座位占用"分支 → 永不违约、永不释放，待签到预约永久卡 PENDING。`handleEarlyRelease` 同理对 room2 永不生效。需对无视觉覆盖的房间做"超时直接释放（不计违约）"的兜底。
+
+**5. 时段非重叠校验缺失（设计明确要求，未实现）**
+- `backend/.../service/AdminService.java:112-121`（`saveSlot` 直接 insert/update）
+- 问题：设计方案 4.2.4/5.5 明确要求"新增/修改时段必须校验与该房间既有时段无重叠"（`start<新end AND end>新start`），但代码未实现。`uk_room_slot` 只防相同 `start_time`，不防区间重叠 → 管理员可造出重叠时段，破坏"离散时段防重叠"承诺。需在 `saveSlot` 内加区间重叠查询校验。
+
+**6. 定时任务与签到/取消存在竞态，可能覆盖用户操作**
+- `ReservationScanTask.java:78-94`、`ReservationService.java:157-172`（`sign`）、`:143-152`（`cancel`）
+- 问题：都是"先查 status 再 `updateById`"的非原子读-改-写。扫描任务读到 PENDING 后，用户恰在此刻签到置 SIGNED，扫描任务随后 `updateById` 会把状态覆盖回 VIOLATED。应改为条件更新（`UPDATE ... WHERE id=? AND status=?`，比对影响行数）或加乐观锁/`select ... for update`。
+
+**7. RestTemplate 无超时，视觉服务挂起会拖死定时任务线程**
+- `backend/.../service/VisionService.java:47`
+- 问题：`new RestTemplate()` 无连接/读取超时（默认无限等待）。视觉服务假死时，5s 定时任务线程被阻塞，后续轮询堆积。建议配置 `SimpleClientHttpRequestFactory` 的 connect/read timeout（如 3s）。
+
+**8. CORS 与拦截器冲突：OPTIONS 预检请求被 JwtInterceptor 拒绝**
+- `backend/.../config/WebConfig.java:20-23`、`backend/.../security/JwtInterceptor.java:28-30`
+- 问题：拦截器对 `/api/**` 的所有请求（含 OPTIONS 预检）都要求 `Authorization: Bearer`，而预检请求不带该头 → 401 → 跨域部署时 CORS 预检失败。开发期走 Vite 代理掩盖了此问题。应在 `preHandle` 首行放行 `OPTIONS`。
+
+**9. CORS 配置 `allowedOriginPatterns("*")` + `allowCredentials(true)` 不安全**
+- `backend/.../config/WebConfig.java:28-34`
+- 问题：任意来源携带凭证。JWT 存于 Authorization 头本无需 `allowCredentials`。应限定前端来源列表，关闭 `allowCredentials`。
+
+**10. 密钥/初始密码硬编码并提交；明文打印管理员密码**
+- `backend/src/main/resources/application.yml:27`（JWT 密钥）、`:44`（`[默认值已移除]`）、`config/DataInitializer.java:47`（`log.info("... {} / {}", username, password)`）
+- 问题：密钥与初始管理员密码写在配置文件并提交；启动时把管理员密码明文打到日志。毕业设计可接受，但应改为环境变量注入并删除明文日志。
+
+**11. 前端只支持单时段预约，多连续时段功能不可达**
+- `frontend/src/views/SeatMap.vue:138`（`slotIds: [slotId.value]`）、`:7-11`（单时段下拉）
+- 问题：后端 `ReserveDTO` 支持 `slotIds` 数组、设计 U4 要求"1~N 连续时段"，但前端 UI 只能选 1 个时段。功能缺失，且连续时段校验逻辑（`ReservationService.java:107-111`）实际无法被前端触发。
+
+**12. 业务异常统一返回 HTTP 200，与接口约定不一致**
+- `backend/.../common/GlobalExceptionHandler.java:21-24`
+- 问题：`handleBusiness` 未加 `@ResponseStatus`，401/403/409 均以 HTTP 200 + body code 返回（`handleOther` 却返回真实 500）。前端已兼容（读 body code），但不符合设计接口规范，也不利于第三方/网关按状态码处理。
+
+---
+
+## 【建议】
+
+**13. 禁用用户后其已签发 token 仍有效（最长 2h）** — `JwtInterceptor` 只验 token 不查库，管理员禁用用户后旧 token 仍可预约。无状态设计固有限制，可接受，但建议缩短有效期或加轻量黑名单。
+
+**14. ThreadLocal 泄漏** — `JwtInterceptor.java`：`preHandle` 抛异常时 `afterCompletion` 不执行，`UserContext` 未 `clear()`。因下次请求会 `set` 覆盖而功能无害，但属线程池卫生问题，建议失败路径主动 clear。
+
+**15. 默认日期取 UTC 日期** — `SeatMap.vue:82` 用 `toISOString().slice(0,10)`，UTC+8 凌晨 0~8 点会得到"昨天"，导致默认日期错误。应改用本地日期格式化。
+
+**16. DuplicateKeyException 错误文案不通用** — `GlobalExceptionHandler.java:31` 固定返回"该座位/时段已被预约"，但注册重名、管理员新增座位/学号冲突等同样触发，文案误导。
+
+**17. 管理端增改缺少 Bean Validation** — `AdminController` 的 saveRoom/saveSeat/saveSlot 未加 `@Valid`，实体无校验注解（时段 start<end、容量>0、坐标>0 等均未校验），全依赖 DB 兜底。
+
+**18. `listReservations` 存在 N+1 查询** — `AdminService.java:156-168` 每条记录 4 次 `selectById`。数据量小可接受，建议 join 或批量查询。
+
+**19. `reset_background` 复用同一帧学习** — `detector.py:107-114` 用同一 `gray` 循环 `apply` 30 次，并非注释所述的"多帧学习"，实际等同单帧，建议读取多帧或修正注释。
+
+**20. 视觉 ROI 仅标定 6 座** — `vision-service/config.json:20-27` 只含 A-01~A-06，而 room1 有 30 座，其余 24 座永远不会被视觉更新/结算，演示需补齐或说明。
+
+**21. 统计口径不一致** — `StatsService.java:39`（overview"今日预约量"含已取消）与 `:78-92`（trend 排除已取消 `status!=3`）口径不同。
+
+**22. 死代码** — `app.py:58-60` 空 `if` 分支无实际作用。
+
+---
+
+## 总体结论
+
+架构设计（离散时段 + 生成列条件唯一索引防重叠、单一数据源写座位状态、视觉/后端解耦、审计留痕）是**正确且有想法**的，数据库设计基本闭环，防重叠的唯一索引思路严谨。
+
+但当前代码**尚不能作为"一次性完善"的毕业设计交付**，存在两处致命缺陷：① 管理员鉴权注解层级错配导致全部管理接口越权可被任意学生访问；② 后端与视觉服务的 `/detect` 响应结构不一致导致视觉联动（含违约/离座释放核心闭环）完全失效。此外"已完成"状态机缺失、非视觉房间预约卡死、时段重叠校验缺失、定时任务与签到竞态等问题会使核心业务流程出现数据不一致或永久卡死。
+
+建议优先修复 1、2、3、4 四项，再补 5、6 的校验与并发控制，最后清理 7~12 的健壮性与一致性项，即可达到毕业设计"第一版即完善"的交付标准。

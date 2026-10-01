@@ -1,0 +1,78 @@
+复核完成。我已通读上一轮问题清单、修复记录，并逐文件复核了后端关键类、前端核心视图、视觉服务及实体/Mapper/DTO/控制器层。以下为复核结论。
+
+---
+
+## 【致命】
+
+无。上一轮两处致命问题均已正确修复到位，未发现新的致命缺陷。
+
+---
+
+## 【重要】
+
+**1. 视觉房未标定座位的预约仍会永久卡 PENDING（#4 修复不彻底）**
+- `ReservationScanTask.java:95-101` + `VisionService.java:94-98`
+- 问题：`handleTimeoutViolations` 对视觉覆盖房间（room1）判定是否违约，唯一依据是 `visionService.emptyMinutes(seatId) > 0`。而 `seatEmptySince` 只在 `syncSeatStatus` 里、当座位出现在 `/detect` 结果中时才会建立（`VisionService.java:94-98`，`detect.get()` 为 null 即 `continue`）。视觉 `config.json` 只标定 A-01~A-06 共 6 座，room1 其余 24 座永远 `emptyMinutes==0` → 落入 `if (!seatEmpty) continue` → **既不违约也不释放，永久 PENDING**。
+- 影响：room2（非视觉房）卡死已修复，但视觉主房 24/30 座位的"未签到"场景仍然卡死，核心违约闭环在这部分座位上仍失效。
+- 修复建议：`VisionService` 暴露"本次 detect 实际覆盖的 seatId 集合"（或 `seatEmptySince` 是否含该座位），`handleTimeoutViolations` 对"视觉覆盖房间但座位未被视觉覆盖"的情况，回退到与非视觉房一致的处理（超时直接违约），而不是当作"座位占用"跳过。
+
+---
+
+## 【建议】
+
+**2. sign/cancel 仍是非原子 `updateById`（#6 只修了扫描侧）**
+- `ReservationService.java:150-151`（cancel）、`:168-170`（sign）
+- 问题：修复记录声称"全部状态流转改条件更新"，但用户侧 `sign`/`cancel` 仍是 `getOwnPending` 查 status → `updateById` 无条件覆盖。严格意义上的读-改-写竞态仍在。
+- 评估：实际风险很低——签到窗口为 `slotStart±15min`、违约判定在 `slotStart+30min`、取消截止在 `slotStart-30min`，三者时间窗互不重叠，扫描侧又已改条件更新，因此扫描覆盖用户操作的方向已封死，反向覆盖在正常业务下不会发生。属"修复记录言过其实"而非实际漏洞。
+- 修复建议：如追求严谨，可同样改为 `UPDATE ... WHERE id=? AND status=PENDING` 条件更新，比对影响行数；不改也可交付。
+
+**3. 数据库密码仍硬编码（#10 残留）**
+- `application.yml:11`（`password: [默认值已移除]`）
+- 问题：JWT 密钥、管理员初始密码均已环境变量化，但 MySQL 密码仍明文提交。毕设场景可接受，建议同口径改为 `${MYSQL_PASSWORD:[默认值已移除]}`。
+
+**4. 前端多时段只按首时段显示座位可用性**
+- `SeatMap.vue:115`（`slotId: slotIds.value[0]`）
+- 问题：多选连续时段后，座位网格只按第一个时段渲染，第二个时段冲突的座位仍显示"可约"，点击提交才被后端唯一索引驳回。非正确性缺陷（后端兜底），但体验有误导。
+- 修复建议：可对每个选中时段分别查询取交集，或至少在提交失败时给出明确"所选连续时段中某段已被占用"提示。
+
+**5. 非视觉房"无证据直接违约"为产品性取舍**
+- `ReservationScanTask.java:102-105`
+- 问题：room2 无摄像头，学生未签到超时即计违约（累计 3 次禁约），但无法证明其是否实际到场。这是有意的设计取舍（修复记录已声明"按规则执行"），但答辩时可能被追问公平性。
+- 建议：在方案文档/答辩口径中明确该取舍，或对非视觉房改为"超时释放不计违约"。
+
+**6. MyBatis SQL 全量 stdout 日志**
+- `application.yml:19`（`log-impl: StdOutImpl`）
+- 建议：生产/演示可去掉或改为 DEBUG 级别，避免控制台刷屏。
+
+---
+
+## 【通过项】
+
+| 编号 | 原问题 | 复核结论 |
+|---|---|---|
+| 致命1 | 类级 `@RequireRole` 越权 | ✅ `JwtInterceptor.java:50-54` 用 `findMergedAnnotation(方法)` + `getBeanType().getAnnotation` 兜底，`AdminController`/`VisionController` 管理接口均已限管理员 |
+| 致命2 | `/detect` 响应结构不匹配 | ✅ `VisionService.java:169-198` 改收顶层 Map 取 `results`，兼容 `{"error"}`；视觉联动闭环恢复 |
+| 重要3 | SIGNED→FINISHED 缺失 | ✅ `ReservationScanTask.java:112-128` 新增 `handleFinished`，含跨天遗留收尾 |
+| 重要4 | 非视觉房卡死 | ⚠️ 部分修复（room2 已解决，room1 未标定座位仍卡，见【重要】1） |
+| 重要5 | 时段重叠校验缺失 | ✅ `AdminService.java:124-132` 区间重叠校验 + 编辑排除自身，逻辑正确 |
+| 重要6 | 扫描/用户竞态 | ⚠️ 扫描侧已条件更新（`ReservationScanTask.java:157-164`），用户侧残留见【建议】2 |
+| 重要7 | RestTemplate 无超时 | ✅ `VisionService.java:50-56` connect/read 各 3s |
+| 重要8 | OPTIONS 被拦截 | ✅ `JwtInterceptor.java:30-32` 首行放行 |
+| 重要9 | CORS 任意来源+凭证 | ✅ `WebConfig.java:30-35` 限定来源、关闭 credentials |
+| 重要10 | 密钥/密码硬编码+明文日志 | ✅ JWT/管理员密码环境变量化、`DataInitializer` 删除明文密码（DB 密码残留见【建议】3） |
+| 重要11 | 前端单时段不可达 | ✅ `SeatMap.vue:9-12,147` 多选连续时段，`slotIds` 数组提交，DTO/API 对齐 |
+| 重要12 | 业务异常 HTTP 200 | ✅ `GlobalExceptionHandler.java:22-29` 返回真实状态码 |
+| 建议14 | ThreadLocal 泄漏 | ✅ `JwtInterceptor.java:59-62` 异常路径主动 clear |
+| 建议15 | UTC 日期偏移 | ✅ `SeatMap.vue:82-94` 本地时区格式化 |
+| 建议16 | DuplicateKey 文案误导 | ✅ `GlobalExceptionHandler.java:37-38` 泛化文案 |
+| 建议19 | 单帧假多帧 | ✅ `detector.py:107-116` 每帧 apply 一次真实多帧学习 |
+| 建议21 | 统计口径不一致 | ✅ `StatsService.java:40-42` 与 `ReservationMapper.java:17-19` 均排除已取消，口径统一 |
+| 建议22 | app.py 死代码 | ✅ `app.py:69-81` 重构为 `_read_frames`，空 if 已删 |
+
+---
+
+## 总体结论
+
+**两处致命缺陷已全部修复到位且方式正确，10 项重要问题中 8 项完整修复、1 项部分修复、1 项（竞态）修复记录言过其实但实际无危害。** 修复过程未引入编译级或逻辑级新错误（DTO/API/实体状态常量/条件更新 SQL 均自洽）。
+
+**是否可以交付：可以交付，但强烈建议先补上【重要】1**——视觉主房未标定座位（24/30）的超时违约兜底。这一处是上轮"卡死"问题在视觉房内的残留，会让演示时"未签到"场景在大多数座位上表现为预约永久挂起，答辩时容易被抓。修复量很小（约 5-10 行）。若你的演示只覆盖已标定的 A-01~A-06 与 room2，且不演示未标定座位的违约流程，则当前状态已可交付；【建议】项按时间酌情处理即可。

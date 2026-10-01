@@ -1,0 +1,6 @@
+{
+  "api_key": "sk-请填入你的DeepSeek密钥",
+  "base_url": "https://api.deepseek.com/chat/completions",
+  "model": "deepseek-chat",
+  "max_tokens": 4000
+}

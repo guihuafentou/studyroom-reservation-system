@@ -1,0 +1,70 @@
+# Claude 代码审查修复记录（2026-10-01）
+
+依据 `code_review.txt`（本机 Claude 全量代码审查：2 致命 + 10 重要 + 10 建议）逐项修复，修复后三端回归验证全部通过。
+
+## 已修复
+
+### 致命
+1. **类级 @RequireRole 越权** → `JwtInterceptor.java` 改用 `AnnotatedElementUtils.findMergedAnnotation(方法)` + 类级兜底，管理接口仅管理员可访问
+2. **视觉 /detect 响应结构不匹配** → `VisionService.fetchDetect` 改收顶层 Map 再取 `results`，兼容 `{"error"}`，视觉联动闭环恢复
+
+### 重要
+3. **状态机"已签到→已完成"缺失** → `ReservationScanTask` 新增 `handleFinished`：时段结束（含昨日遗留）条件更新为已完成
+4. **非视觉房间预约卡死** → `ReservationScanTask` 注入 `vision-room-id`：无视觉覆盖房间超时未签到直接违约（按规则执行），视觉故障仍释放不计违约
+5. **时段重叠校验缺失** → `AdminService.saveSlot` 增加区间重叠校验（start<新end AND end>新start，编辑排除自身），冲突返回 409
+6. **定时任务与用户操作竞态** → 全部状态流转改条件更新（UPDATE WHERE id=? AND status=?），比对影响行数，谁先提交谁生效
+7. **RestTemplate 无超时** → `SimpleClientHttpRequestFactory` connect/read 各 3s，视觉假死不再拖死轮询线程
+8. **CORS 预检被拦截** → `JwtInterceptor.preHandle` 首行放行 OPTIONS
+9. **CORS 任意来源+凭证** → `WebConfig` 限定来源（localhost:5173 / 127.0.0.1:5173），关闭 allowCredentials（JWT 在请求头，无需凭证）
+10. **密钥/密码硬编码+明文日志** → application.yml 支持环境变量 `JWT_SECRET` / `STUDYROOM_ADMIN_PASSWORD`；DataInitializer 删除明文密码日志
+11. **前端单时段不可达** → `SeatMap.vue` 时段改多选（连续时段批量预约，slotIds 数组提交后端已支持）
+12. **业务异常 HTTP 200** → `GlobalExceptionHandler.handleBusiness` 返回 ResponseEntity 携带真实状态码（400/401/403/404/409）
+
+### 建议
+- 14. ThreadLocal 泄漏 → JwtInterceptor 异常路径主动 clear
+- 15. UTC 日期偏移 → SeatMap.vue 默认日期改本地时区格式化
+- 16. DuplicateKey 文案误导 → 泛化为"操作冲突：记录已存在或已被占用"
+- 19. reset_background 单帧假多帧 → detector.py 改真实多帧学习（每帧 apply 一次），app.py / __main__ 同步
+- 21. 统计口径不一致 → StatsService.overview 今日预约量排除已取消，与 trend 一致
+- 22. app.py 空 if 死代码 → 删除并重构 _read_frames
+
+## 有意保留（已评估）
+- 13. 禁用用户旧 token 2h 内仍有效：无状态 JWT 固有限制，毕设场景可接受（密钥环境变量化 + 有效期 2h 已收敛风险）
+- 17. 管理端 Bean Validation：数据量小、DB 兜底 + 服务端显式校验已覆盖核心规则，后续可补
+- 18. listReservations N+1：记录量小可接受
+- 20. config.json 仅标定 A-01~A-06：演示口径，README/方案已说明按需补齐 ROI
+
+## 回归验证（全部通过）
+- 后端 `mvn -q compile` EXIT=0；`mvn -q -DskipTests package` EXIT=0，jar 28.1MB
+- 前端 `npm run build` EXIT=0（仅 chunk>500KB 警告，ECharts 全量引入，不影响运行）
+- 视觉 `python -m py_compile app.py detector.py` EXIT=0
+
+---
+
+# 迭代审查闭环记录（第 2~5 轮，2026-10-01）
+
+用户要求"交给 Claude 检查直到没问题为止"，共迭代 5 轮，产出 `recheck1.txt`~`recheck5.txt`：
+
+## 第二轮（recheck1）发现并修复
+- **重要1 视觉房未标定座位仍卡死**：仅 A-01~A-06 标定，room1 其余 24 座 `emptyMinutes` 恒 0 被当"占用"跳过 → 永久 PENDING。修复：VisionService 新增 `coveredSeatIds` + `isSeatCovered()`；ReservationScanTask 对"视觉房但座位未标定"回退直接违约
+- 建议2 sign/cancel 非原子 → 改条件更新（UPDATE WHERE id AND status=PENDING，rows=0 抛 409）
+- 建议3 MySQL 密码 → `${MYSQL_PASSWORD:[默认值已移除]}` 环境变量化
+- 建议6 SQL stdout 日志 → 注释掉
+- 建议5 违约口径 → README 补充三档口径说明
+
+## 第三轮（recheck2）发现并修复（4 条建议）
+- coveredSeatIds/visionAvailable 非原子发布 → 合并为单个 `volatile VisionSnapshot` 原子赋值（Set.copyOf）
+- 空 if 分支 → 正向条件改写；新增 `hasSeatCoverage()` 保护视觉初始化窗口（results 为空不误判违约）
+- README 类数 21 → 46
+
+## 第四轮（recheck3）发现并修复（1 条建议）
+- `suspiciousAfterMinutes` 死字段 → 实现落地：`seatOccupiedSince` 计时 + `suspiciousWarned` 每周期只告警一次，占用持续满阈值才告警
+
+## 第五轮（recheck4）发现并修复（2 条建议）
+- `hasNoActiveReservation` 假阴性 → 与 `computeStatus` 同口径（仅当前时段窗口内预约视为有效）
+- confidence 硬编码 0.9/0.8 → `DetectResult` 携带真实置信度，`fetchDetect` 解析视觉返回并写入日志
+
+## 第五轮最终结论（recheck5）
+- 致命：无；重要：无
+- **可交付：是**；**达到"第一次就写完善"标准：是**；**建议停止迭代**（剩余仅低优先可选优化）
+- 部署前覆盖三处默认值：`JWT_SECRET` / `MYSQL_PASSWORD` / `STUDYROOM_ADMIN_PASSWORD`

@@ -1,0 +1,6 @@
+# 视觉识别服务依赖
+# 建议 Python 3.10 ~ 3.12 环境（conda 创建），Python 3.13+/3.14 可能缺少 opencv 预编译轮子
+fastapi>=0.110
+uvicorn>=0.29
+opencv-python>=4.8
+numpy>=1.24

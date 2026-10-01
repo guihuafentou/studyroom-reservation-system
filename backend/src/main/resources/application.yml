@@ -1,0 +1,52 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: studyroom-backend
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/studyroom?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    # 数据库密码必须通过环境变量 MYSQL_PASSWORD 注入（代码无默认值）
+    password: ${MYSQL_PASSWORD}
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    # 演示/生产建议关闭 SQL 日志，需要调试时取消下行注释
+    # log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+# 业务配置
+studyroom:
+  jwt:
+    # JWT 签名密钥必须通过环境变量 JWT_SECRET 注入（代码无默认值）
+    secret: ${JWT_SECRET}
+    expire-hours: 2
+  vision:
+    base-url: http://127.0.0.1:8001
+    poll-interval-ms: 5000
+    room-id: 1
+  rule:
+    sign-before-minutes: 15        # 签到宽限：时段开始前
+    sign-after-minutes: 15         # 签到宽限：时段开始后
+    violate-after-minutes: 30      # 超时未签到判违约
+    release-after-minutes: 30      # 已签到离座释放阈值
+    suspicious-after-minutes: 10   # 疑似占座阈值
+    cancel-before-minutes: 30      # 取消截止：时段开始前
+    violate-limit: 3               # 违约满 N 次禁约
+    ban-days: 7                    # 禁约天数
+  init-admin:
+    username: admin                # 首次启动自动创建的管理员账号
+    # 管理员初始密码必须通过环境变量 STUDYROOM_ADMIN_PASSWORD 注入（代码无默认值）
+    password: ${STUDYROOM_ADMIN_PASSWORD}
+
+logging:
+  level:
+    com.campus.studyroom: info

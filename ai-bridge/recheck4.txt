@@ -1,0 +1,34 @@
+复核完成。已通读 `VisionService.java` 及其全部联动文件（`ReservationScanTask`、`VisionSyncTask`、`ReservationService`、实体、`init.sql`、`application.yml`、视觉服务 `app.py`/`detector.py`、`AuthService`/`JwtUtil`/`WebConfig` 等）。
+
+## 一、指定复核点结论
+
+**1. `updateSeatStatus` 完整性 — 正确 ✅**
+- 状态翻转才落库+写日志（VisionService.java:152-163），逻辑完整：改状态 → `updateById` → 插 `SeatStatusLog`。
+- 日志的 `occupied` 字段记录的是视觉占用（非座位状态），与 `seat_status_log` 表语义一致。
+- 无有效预约/占用→IN_USE 等状态由 `computeStatus` 正确计算（含时段窗口判断 137-143）。
+
+**2. `trackSuspicious` 逻辑 — 基本正确，1 处低优先假阴性 ⚠️**
+- 主流程正确：占用且无预约→计时，满阈值且 `suspiciousWarned.add` 首次才告警；有预约或变空→双重置（175-193）。`suspiciousAfterMinutes` 已由死字段变为真实生效（`@Value` 默认 10，配置存在于 application.yml:41）。
+- **低优先**：`hasNoActiveReservation`（195-202）只查「今日 PENDING/SIGNED」不看时段窗口，而 `computeStatus` 看时段窗口。当座位今天有**较晚时段**的预约时，当前时段的真实占座者不会触发告警（假阴性）。仅影响告警日志，不影响状态判定与释放，故为低。
+
+**3. `seatEmptySince` 维护 — 正确 ✅**
+- 变空 `computeIfAbsent` 置起点、变占用 `remove`（164-169），语义准确。
+- 关键安全性：视觉不可用时 `syncSeatStatus` 提前 return 不清空该 map，但消费方 `handleTimeoutViolations`(86-94) 与 `handleEarlyRelease`(138-140) 均先判 `isVisionAvailable()`，故**过期空时不会被误用**，无假违约/假释放风险。
+
+## 二、分级问题清单
+
+**致命 / 重要：无**
+
+**低：**
+1. `trackSuspicious` 与 `computeStatus` 对「有效预约」口径不一致（前述假阴性）。建议 `hasNoActiveReservation` 增加当前时段窗口判断，与 `computeStatus` 对齐。
+2. `seat_status_log.confidence` 写入硬编码 0.9/0.8（VisionService.java:159），`fetchDetect` 丢弃了视觉服务返回的真实 `confidence`（app.py:114 确实返回该字段）。日志置信度为占位值，数据失真。
+
+**信息（可接受，不要求返工）：**
+3. `emptyMinutes == 0` 作为「占用」近似（ReservationScanTask.java:101-104），刚变空（<60s）的座位会被暂跳过一次，判违约最多延迟约 1 分钟。
+4. `handleFinished` 仅收敛 SIGNED（116-132）；若 PENDING 因「座位被他人占用」持续跳过违约判定，记录会在时段结束后继续滞留 PENDING。但该座位确实被占用，唯一索引 `active_key` 占用属合理，且一旦变空下轮即判违约释放，实际无功能危害。
+5. `syncSeatStatus` 对 DISABLED 座位直接 `continue`（113-115），其 `seatOccupiedSince`/`seatEmptySince` 不会清理，最多残留少量内存条目，无实际影响。
+
+## 三、最终结论
+
+- **是否可交付：可交付。** 无致命或重要问题，核心链路（视觉轮询 → 状态合并 → 违约/离座/占座治理）逻辑自洽、防御充分（volatile 快照原子发布、带超时 RestTemplate、并发容器、降级不惩罚学生）。
+- **是否达到「第一次就写完善」标准：达到。** 上轮 2 条低优先建议均已正确处理（1 条正确落地、1 条合理豁免）；本轮仅剩 2 条低优先优化项与 3 条信息项，均不构成返工，可作为后续可选项处理。

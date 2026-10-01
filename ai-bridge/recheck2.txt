@@ -1,0 +1,27 @@
+复核完成。以下为分级结论。
+
+## 一、五项修复逐项确认（全部到位）
+
+| 修复项 | 结论 |
+|---|---|
+| **重要1** 视觉房未标定座位卡死 | ✅ 到位。`VisionService.coveredSeatIds` 在每次 `syncSeatStatus()` 成功轮询时 `clear()+addAll(detect.keySet())` 刷新；`isSeatCovered()` 判定准确。我核对了 `detector.detect()`：它对**所有已配置 ROI 的座位**都输出（含空座 `occupied=false`），因此 `detect.keySet()` 恒等于"已标定座位集合"，能可靠区分"已标定/未标定"。未标定座位回退为直接违约，且 `ReservationScanTask` 有 `@Scheduled` 每分钟驱动，`VisionSyncTask` 每 5s 驱动 `syncSeatStatus()`，链路闭环。无新问题。 |
+| **建议2** sign/cancel 非原子 | ✅ 到位。`cancel()`/`sign()` 均改为 `UPDATE ... WHERE id=? AND status=PENDING`，`rows==0` 抛 `BusinessException.conflict`；已确认 `conflict()`→409，`GlobalExceptionHandler` 按 `e.getCode()` 正确映射真实 HTTP 状态码。与扫描任务的 `conditionalUpdate` 同为条件更新，互不覆盖。 |
+| **建议3** MySQL 密码硬编码 | ✅ 到位。`password: ${MYSQL_PASSWORD:[默认值已移除]}`，与 `JWT_SECRET`、`STUDYROOM_ADMIN_PASSWORD` 同一环境变量注入模式。 |
+| **建议6** SQL stdout 日志 | ✅ 到位。`log-impl: StdOutImpl` 已注释。 |
+| **建议5** 非视觉房违约口径 | ✅ 到位。README §九 第三点已写明三档口径（视觉覆盖空座判违约/占用等待；未覆盖按规则直接违约；服务故障释放不违约）。 |
+
+鉴权接线无回归：`JwtInterceptor` 注册于 `/api/**`（仅放行 login/register + OPTIONS），`AdminController` 类级 `@RequireRole(1)` 经 `AnnotatedElementUtils` 方法级优先、类级兜底生效。
+
+## 二、分级问题清单
+
+- **致命：无**
+- **重要：无**
+- **建议（低优先，不影响交付）：**
+  1. `coveredSeatIds`/`visionAvailable` 发布非原子。`syncSeatStatus` 先置 `visionAvailable=true`、再 `clear()+addAll()`，与 `scan()` 是两个独立 `@Scheduled` 线程。理论上并发时存在微秒级窗口误判"未覆盖→直接违约"。建议把两者合并为单个 `volatile` 快照字段原子发布（如 `volatile VisionSnapshot`，用 `Map.copyOf`/`Set.copyOf` 一次性赋值）。
+  2. `handleTimeoutViolations` 中空 `if` 分支仅靠注释承载语义（`vision-service` 空 if + else），可读性差。建议改写为正向条件：`if (visionService.isSeatCovered(seatId) && visionService.emptyMinutes(seatId, now) == 0) continue;`，去掉空分支。
+  3. 视觉服务重启后首轮 `/detect` 因 `background_ready=false` 返回 `results:[]`（约 5 秒窗口），此窗口内 room-1 会被短暂当作"未覆盖"。概率极低、影响可忽略，但与建议 1 同源（快照为空），可一并由快照方案缓解。
+  4. README §三 "21 个类" 与实际约 46 个 Java 类不符，属文档口径小瑕疵。
+
+## 三、总体结论
+
+**已达到毕设一次性完善交付标准。** 五项修复均正确落地，上一轮唯一"重要"级残留已闭环，全工程复查未发现新的致命/重要问题；剩余仅为 4 条低优先建议（并发快照原子性、空分支写法、文档计数），不构成交付阻断。
