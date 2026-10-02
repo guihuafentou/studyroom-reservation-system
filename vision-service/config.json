@@ -1,28 +1,69 @@
 {
-  "video_source": 0,
+  "video_source": "samples/demo_real2.mp4",
   "room_id": 1,
   "frame_interval": 1.0,
-  "detector": "mog2",
-  "mog2": {
-    "history": 200,
-    "var_threshold": 16,
-    "detect_shadows": false,
-    "learning_rate": 0.0,
-    "min_area": 800,
-    "min_w": 30,
-    "min_h": 30,
-    "min_ratio": 0.25,
-    "max_ratio": 4.0,
-    "overlap_threshold": 0.5,
-    "debounce_frames": 3,
-    "reset_frames": 30
+  "detector": "yolo",
+  "overlay_hidden": [
+    "A-07",
+    "A-08",
+    "A-09",
+    "A-10",
+    "A-11",
+    "A-12",
+    "A-13",
+    "A-14"
+  ],
+  "base": {
+    "smart_empty": true,
+    "sample_mode": "full_span",
+    "freeze_bg": true,
+    "occupy_ratio": 0.1,
+    "debounce_frames": 7
+  },
+  "median": {
+    "diff_threshold": 12,
+    "window_frames": 120,
+    "refresh_frames": 999999,
+    "occupy_ratio": 0.1,
+    "debounce_frames": 7,
+    "reset_frames": 120,
+    "appearance_enabled": true,
+    "skin_cb_min": 77,
+    "skin_cb_max": 127,
+    "skin_cr_min": 133,
+    "skin_cr_max": 173,
+    "skin_ratio_thr": 0.08,
+    "tex_norm": 500.0,
+    "tex_score_thr": 0.3
   },
   "seats": [
-    { "seat_no": "A-01", "bbox": [60, 60, 130, 130] },
-    { "seat_no": "A-02", "bbox": [160, 60, 230, 130] },
-    { "seat_no": "A-03", "bbox": [260, 60, 330, 130] },
-    { "seat_no": "A-04", "bbox": [360, 60, 430, 130] },
-    { "seat_no": "A-05", "bbox": [460, 60, 530, 130] },
-    { "seat_no": "A-06", "bbox": [560, 60, 630, 130] }
-  ]
+    {"seat_no": "A-01", "bbox": [80, 55, 200, 175]},
+    {"seat_no": "A-02", "bbox": [45, 120, 175, 250]},
+    {"seat_no": "A-03", "bbox": [195, 160, 310, 295]},
+    {"seat_no": "A-04", "bbox": [290, 165, 365, 290]},
+    {"seat_no": "A-05", "bbox": [20, 225, 150, 355]},
+    {"seat_no": "A-06", "bbox": [130, 230, 235, 355]},
+    {"seat_no": "A-07", "bbox": [345, 272, 379, 400]},
+    {"seat_no": "A-08", "bbox": [379, 272, 413, 400]},
+    {"seat_no": "A-09", "bbox": [413, 272, 447, 400]},
+    {"seat_no": "A-10", "bbox": [447, 272, 480, 400]},
+    {"seat_no": "A-11", "bbox": [480, 272, 514, 400]},
+    {"seat_no": "A-12", "bbox": [514, 272, 548, 400]},
+    {"seat_no": "A-13", "bbox": [548, 272, 582, 400]},
+    {"seat_no": "A-14", "bbox": [582, 272, 616, 400]}
+  ],
+  "yolo": {
+    "model_path": "models/yolov8n.onnx",
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "min_chair_w": 20,
+    "min_chair_h": 20,
+    "max_seats": 40,
+    "dedup_dist": 25,
+    "occupy_overlap": 0.15,
+    "sit_aspect_min": 0.45,
+    "label_frames": 12,
+    "cache_interval": 1.0,
+    "person_floor_ratio": 0.55
+  }
 }
